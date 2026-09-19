@@ -14,6 +14,10 @@ Maintainer contact:
   https://proteinlanguagemodel.com/
   https://x.com/ravishar313
 
+Multi-provider LLM settings, live model catalog refresh, and provider
+persistence contributions by Sameer Reddy M:
+  https://github.com/sameer24688-jpg
+
 For contributions that are specific to this fork's PyMolAI layer,
 preserve upstream Schrodinger attribution and clearly mark fork-specific
 changes in commit history and documentation.

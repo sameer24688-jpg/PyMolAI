@@ -3,7 +3,7 @@
 PyMolAI extends open-source PyMOL with an integrated AI assistant panel for molecular workflows.
 It adds provider-backed reasoning, tool execution, and optional OpenBio API gateway access while keeping normal PyMOL usage unchanged.
 
-The upstream open-source foundation remains this repository: [pymol-open-source](https://github.com/schrodinger/pymol-open-source).
+This public build is maintained at [sameer24688-jpg/PyMolAI](https://github.com/sameer24688-jpg/PyMolAI) and is based on [ravishar313/PyMolAI](https://github.com/ravishar313/PyMolAI), with multi-provider LLM settings and model-catalog work by [Sameer Reddy M](https://github.com/sameer24688-jpg). Upstream open-source PyMOL foundation: [pymol-open-source](https://github.com/schrodinger/pymol-open-source).
 
 ![PyMolAI UI](assets/UI.png)
 
@@ -12,7 +12,9 @@ The upstream open-source foundation remains this repository: [pymol-open-source]
 | Capability | Status |
 |---|---|
 | Chat panel in Qt desktop UI | Included |
-| OpenRouter-backed model access | Included |
+| Multi-provider LLM access (OpenRouter, Fireworks, Anthropic, OpenAI, DeepSeek, Kimi, custom URL) | Included |
+| Edit AI Models + live provider catalog refresh | Included |
+| Provider/model preference persistence across restart | Included |
 | Internal PyMOL tool: `run_pymol_command` | Included |
 | Internal validation tool: `capture_viewer_snapshot` | Included |
 | OpenBio API gateway tools | Optional (only when `OPENBIO_API_KEY` is set) |
@@ -39,7 +41,7 @@ PyMolAI chat UI is designed for Qt desktop usage (`pmg_qt`).
 
 ## Network/API Requirements
 
-- OpenRouter access for model turns.
+- An API key for the active LLM provider (OpenRouter by default; Fireworks, Anthropic, OpenAI, DeepSeek, Kimi, or custom URL also supported).
 - Optional OpenBio access for OpenBio tools (default base URL: `https://api.openbio.tech`).
 
 ## Installation Quickstarts
@@ -49,7 +51,7 @@ PyMolAI chat UI is designed for Qt desktop usage (`pmg_qt`).
 ### Step 0 — Clone the repository
 
 ```bash
-git clone https://github.com/ravishar313/PyMolAI
+git clone https://github.com/sameer24688-jpg/PyMolAI
 cd PyMolAI
 ```
 
@@ -98,7 +100,7 @@ If `claude_agent_sdk` import fails, verify the interpreter is Python 3.10+.
 ## Windows (PowerShell, source install with uv)
 
 ```powershell
-git clone https://github.com/ravishar313/PyMolAI
+git clone https://github.com/sameer24688-jpg/PyMolAI
 cd PyMolAI
 uv venv .venv --python 3.10
 .\.venv\Scripts\Activate.ps1
@@ -281,8 +283,8 @@ Action:
 
 ## Maintainer Contact
 
-- Website: [proteinlanguagemodel.com](https://proteinlanguagemodel.com/)
-- X/Twitter: [@ravishar313](https://x.com/ravishar313)
+- Upstream PyMolAI maintainer: [proteinlanguagemodel.com](https://proteinlanguagemodel.com/) · [@ravishar313](https://x.com/ravishar313)
+- Multi-provider LLM contributions: [Sameer Reddy M](https://github.com/sameer24688-jpg) · [this public build](https://github.com/sameer24688-jpg/PyMolAI)
 
 ## Legacy Upstream Notes
 

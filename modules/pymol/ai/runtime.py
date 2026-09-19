@@ -10,10 +10,21 @@ import uuid
 from typing import Dict, List, Optional, Tuple
 
 from .claude_sdk_loop import ClaudeSdkLoop
+from .openai_compat_loop import OpenAICompatLoop
 from .message_types import UiEvent, UiRole
 from .openrouter_client import DEFAULT_MODEL
 from .models import is_supported_model
 from .api_key_store import load_saved_key_into_env_if_needed
+from .provider_key_store import load_all_saved_keys_into_env, resolve_api_key
+from .providers import (
+    backend_for_provider,
+    bootstrap_active_provider_env,
+    load_preferred_model,
+    provider_default_model,
+    save_preferred_model,
+    set_active_provider,
+    active_provider_id,
+)
 from .openbio_api_key_store import load_saved_key_into_env_if_needed as load_openbio_saved_key_into_env_if_needed
 from .openbio_client import execute_openbio_api_gateway_tool
 from .state_snapshot import build_viewer_state_snapshot
@@ -100,10 +111,27 @@ class AiRuntime:
         self._log_to_python_logger = os.getenv("PYMOL_AI_LOGGER", "0") == "1"
         key_status = load_saved_key_into_env_if_needed()
         self._api_key_source = key_status.source
+        load_all_saved_keys_into_env()
         openbio_key_status = load_openbio_saved_key_into_env_if_needed()
         self._openbio_api_key_source = openbio_key_status.source
         self.history: List[Dict[str, object]] = []
-        self.model = os.getenv("PYMOL_AI_DEFAULT_MODEL") or DEFAULT_MODEL
+        bootstrap_active_provider_env()
+        self.provider = active_provider_id()
+        if self.provider == "openrouter":
+            self._api_key_source = key_status.source
+        else:
+            try:
+                from .provider_key_store import load_saved_key_into_env_if_needed as load_provider_key
+
+                self._api_key_source = load_provider_key(self.provider).source
+            except Exception:
+                self._api_key_source = key_status.source
+        self.model = (
+            os.getenv("PYMOL_AI_DEFAULT_MODEL")
+            or load_preferred_model(self.provider)
+            or provider_default_model(self.provider)
+            or DEFAULT_MODEL
+        )
         self.reasoning_visible = _env_int("PYMOL_AI_REASONING_DEFAULT", 1) == 1
         self.agent_mode = self._normalize_agent_mode(os.getenv("PYMOL_AI_AGENT_MODE") or "work")
         self.input_mode = "ai"
@@ -143,17 +171,20 @@ class AiRuntime:
         disabled = os.getenv("PYMOL_AI_DISABLE", "").strip() == "1"
         self.enabled = bool(self._api_key) and not disabled
 
-        self._agent_backend = "claude_sdk"
+        self._agent_backend = backend_for_provider(self.provider)
         self._sdk_session_id: Optional[str] = None
         self._chat_query_session_id = self._new_chat_query_session_id()
         self._sdk_loop = ClaudeSdkLoop(logger=self._log_ai)
         self._sdk_loop.set_trace_stream(self.trace_stream_chunks)
-        self._sdk_loop.map_openrouter_env()
+        self._openai_loop = OpenAICompatLoop()
+        if self._agent_backend == "claude_sdk":
+            self._sdk_loop.map_provider_env(self.provider)
         self._recent_tool_results: List[Dict[str, object]] = []
         self._log_ai(
             "runtime initialized",
             enabled=self.enabled,
             input_mode=self.input_mode,
+            provider=self.provider,
             model=self.model,
             reasoning_visible=self.reasoning_visible,
             agent_mode=self.agent_mode,
@@ -169,7 +200,9 @@ class AiRuntime:
 
     @property
     def _api_key(self) -> str:
-        return (os.getenv("OPENROUTER_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN") or "").strip()
+        return resolve_api_key(self.provider) if getattr(self, "provider", None) else (
+            os.getenv("OPENROUTER_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN") or ""
+        ).strip()
 
     @property
     def _openbio_api_key(self) -> str:
@@ -215,9 +248,47 @@ class AiRuntime:
     def current_agent_mode(self) -> str:
         return self.agent_mode
 
+    def set_provider(self, provider_id: str, *, emit_notice: bool = True, reset_model: bool = True) -> str:
+        pid = set_active_provider(provider_id)
+        self.provider = pid
+        self._agent_backend = backend_for_provider(pid)
+        if self._agent_backend == "claude_sdk":
+            self._sdk_loop.map_provider_env(pid)
+        if reset_model:
+            default_model = (
+                load_preferred_model(pid)
+                or provider_default_model(pid)
+            )
+            if default_model:
+                self.model = default_model
+                try:
+                    save_preferred_model(pid, self.model)
+                except Exception:
+                    pass
+        self.enabled = bool(self._api_key) and os.getenv("PYMOL_AI_DISABLE", "").strip() != "1"
+        self._log_ai(
+            "ai provider changed",
+            provider=self.provider,
+            backend=self._agent_backend,
+            model=self.model,
+            enabled=self.enabled,
+        )
+        if emit_notice:
+            self.emit_ui_event(
+                UiEvent(
+                    role=UiRole.SYSTEM,
+                    text="Provider set to %s (%s)." % (self.provider, self._agent_backend),
+                )
+            )
+        return self.provider
+
     def set_model(self, model_id: str, emit_notice: bool = True) -> str:
         value = str(model_id or "").strip() or DEFAULT_MODEL
         self.model = value
+        try:
+            save_preferred_model(self.provider, self.model)
+        except Exception:
+            pass
         busy_now = self.is_busy
         self._log_ai(
             "ai model changed",
@@ -321,6 +392,7 @@ class AiRuntime:
             "chat_query_session_id": self._chat_query_session_id,
             "model_info": {
                 "model": self.model,
+                "provider": self.provider,
                 "enabled": bool(self.enabled),
                 "reasoning_visible": bool(self.reasoning_visible),
                 "debug_mode": bool(self.trace_stream_chunks),
@@ -358,12 +430,23 @@ class AiRuntime:
             if "agent_mode" in model_info:
                 self.set_agent_mode(str(model_info.get("agent_mode") or "work"))
 
-            if apply_model:
-                model = str(model_info.get("model") or "").strip()
-                if model:
+            # Always restore provider/model from chat state when present so reopen
+            # does not fall back to OpenRouter defaults after a successful switch.
+            provider = str(model_info.get("provider") or "").strip()
+            if provider:
+                self.set_provider(provider, emit_notice=False, reset_model=False)
+            model = str(model_info.get("model") or "").strip()
+            if model:
+                if apply_model:
+                    self.set_model(model, emit_notice=False)
+                else:
                     self.model = model
-                if "enabled" in model_info:
-                    self.enabled = bool(model_info.get("enabled"))
+                    try:
+                        save_preferred_model(self.provider, self.model)
+                    except Exception:
+                        pass
+            if "enabled" in model_info:
+                self.enabled = bool(model_info.get("enabled"))
         self._log_ai(
             "session state imported",
             apply_model=apply_model,
@@ -372,6 +455,8 @@ class AiRuntime:
             sdk_session_id=bool(self._sdk_session_id),
             conversation_mode=self.conversation_mode,
             query_session_id=self._chat_query_session_id,
+            provider=self.provider,
+            model=self.model,
             reasoning_visible=self.reasoning_visible,
             agent_mode=self.agent_mode,
             debug_mode=self.trace_stream_chunks,
@@ -1184,7 +1269,9 @@ class AiRuntime:
 
             turn_prompt = self._build_turn_prompt(prompt, include_history_context=include_history_context)
             self._log_ai(
-                "sdk turn run",
+                "agent turn run",
+                backend=self._agent_backend,
+                provider=self.provider,
                 include_history_context=include_history_context,
                 resume_session_id=resume_session_id or "",
                 max_turns=self.max_agent_steps,
@@ -1192,22 +1279,39 @@ class AiRuntime:
                 conversation_mode=self.conversation_mode,
                 query_session_id=self._chat_query_session_id,
             )
-            result = run_sdk_turn(turn_prompt, resume_session_id, include_history_context)
+            if self._agent_backend == "openai_compat":
+                result = self._openai_loop.run_turn(
+                    prompt=turn_prompt,
+                    model=self.model,
+                    api_key=self._api_key,
+                    provider_id=self.provider,
+                    system_prompt=self._build_system_prompt(),
+                    max_turns=self.max_agent_steps,
+                    on_text_chunk=self._on_assistant_chunk,
+                    on_reasoning_chunk=(
+                        (lambda t: self.reasoning_visible and self.emit_ui_event(UiEvent(role=UiRole.REASONING, text=t)))
+                    ),
+                    should_cancel=is_cancelled,
+                    run_command_tool=execute_run_command_tool,
+                    snapshot_tool=execute_snapshot_tool,
+                )
+            else:
+                result = run_sdk_turn(turn_prompt, resume_session_id, include_history_context)
 
-            if result.error_class == "resume_invalid" and not check_cancel():
-                self.reset_remote_session_binding(reason="resume_invalid")
-                turn_prompt = self._build_turn_prompt(prompt, include_history_context=True)
-                self._log_ai(
-                    "sdk resume invalid; retrying with local history context",
-                    conversation_mode=self.conversation_mode,
-                    query_session_id=self._chat_query_session_id,
-                )
-                result = run_sdk_turn(
-                    turn_prompt,
-                    None,
-                    True,
-                    session_reset_reason="resume_invalid",
-                )
+                if result.error_class == "resume_invalid" and not check_cancel():
+                    self.reset_remote_session_binding(reason="resume_invalid")
+                    turn_prompt = self._build_turn_prompt(prompt, include_history_context=True)
+                    self._log_ai(
+                        "sdk resume invalid; retrying with local history context",
+                        conversation_mode=self.conversation_mode,
+                        query_session_id=self._chat_query_session_id,
+                    )
+                    result = run_sdk_turn(
+                        turn_prompt,
+                        None,
+                        True,
+                        session_reset_reason="resume_invalid",
+                    )
 
             if check_cancel():
                 return

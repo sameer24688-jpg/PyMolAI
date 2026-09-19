@@ -274,21 +274,17 @@ class PyMOLQtGUI(QtWidgets.QMainWindow, pymol._gui.PyMOLDesktopGUI):
         self.ai_debug_action = ai_menu.addAction('Debug Mode')
         self.ai_debug_action.setCheckable(True)
 
-        self.ai_api_key_action = ai_menu.addAction('OpenRouter API Key...')
+        self.ai_api_key_action = ai_menu.addAction('LLM Providers...')
         self.ai_openbio_api_key_action = ai_menu.addAction('OpenBio API Key...')
+        # Keep legacy OpenRouter-only entry for discoverability/rollback.
+        self.ai_openrouter_api_key_action = ai_menu.addAction('OpenRouter API Key...')
 
-        ai_model_menu = ai_menu.addMenu('Model')
+        self.ai_edit_models_action = ai_menu.addAction('Edit AI Models...')
+        self.ai_model_menu = ai_menu.addMenu('Model Favorites')
         self.ai_model_action_group = QtWidgets.QActionGroup(self)
         self.ai_model_action_group.setExclusive(True)
         self.ai_model_actions = {}
-        for model_id, friendly_name in model_menu_entries():
-            label = "%s (%s)" % (friendly_name, model_id)
-            action = ai_model_menu.addAction(label)
-            action.setCheckable(True)
-            action.setData(model_id)
-            self.ai_model_action_group.addAction(action)
-            self.ai_model_actions[model_id] = action
-            action.toggled.connect(lambda checked, m=model_id: checked and self._on_ai_model_selected(m))
+        self._rebuild_ai_model_favorites_menu()
 
         ai_mode_menu = ai_menu.addMenu('Assistant Mode')
         self.ai_mode_action_group = QtWidgets.QActionGroup(self)
@@ -308,8 +304,10 @@ class PyMOLQtGUI(QtWidgets.QMainWindow, pymol._gui.PyMOLDesktopGUI):
 
         self.ai_reasoning_action.toggled.connect(self.set_ai_reasoning_visible)
         self.ai_debug_action.toggled.connect(self.set_ai_debug_mode)
-        self.ai_api_key_action.triggered.connect(self._open_ai_api_key_dialog)
+        self.ai_api_key_action.triggered.connect(self._open_ai_provider_dialog)
         self.ai_openbio_api_key_action.triggered.connect(self._open_ai_openbio_api_key_dialog)
+        self.ai_openrouter_api_key_action.triggered.connect(self._open_ai_api_key_dialog)
+        self.ai_edit_models_action.triggered.connect(self._open_ai_model_dialog)
         self.ai_mode_work_action.toggled.connect(lambda checked: checked and self.set_ai_agent_mode('work'))
         self.ai_mode_tutor_action.toggled.connect(lambda checked: checked and self.set_ai_agent_mode('tutor'))
 
@@ -901,12 +899,52 @@ class PyMOLQtGUI(QtWidgets.QMainWindow, pymol._gui.PyMOLDesktopGUI):
         self._sync_ai_settings_menu_from_runtime()
         self.feedback_timer.start(0)
 
+    def _rebuild_ai_model_favorites_menu(self):
+        menu = getattr(self, "ai_model_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+        self.ai_model_actions = {}
+        runtime = self.get_ai_runtime(create=False)
+        provider = getattr(runtime, "provider", None) if runtime is not None else None
+        for model_id, friendly_name in model_menu_entries(provider):
+            label = "%s (%s)" % (friendly_name, model_id)
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setData(model_id)
+            self.ai_model_action_group.addAction(action)
+            self.ai_model_actions[model_id] = action
+            action.toggled.connect(lambda checked, m=model_id: checked and self._on_ai_model_selected(m))
+
     def _on_ai_api_key_changed(self):
         runtime = self.get_ai_runtime(create=False)
         if runtime is not None:
             runtime.ensure_ai_default_mode(emit_notice=False)
+        self._rebuild_ai_model_favorites_menu()
         self._persist_runtime_state_now()
         self._sync_ai_settings_menu_from_runtime()
+
+    def _open_ai_model_dialog(self):
+        from .ai_model_dialog import AiModelDialog
+
+        runtime = self.get_ai_runtime(create=True)
+        self.ai_model_dialog = AiModelDialog(
+            self,
+            runtime=runtime,
+            on_changed=self._on_ai_api_key_changed,
+        )
+        self.ai_model_dialog.exec_()
+
+    def _open_ai_provider_dialog(self):
+        from .ai_provider_dialog import AiProviderDialog
+
+        runtime = self.get_ai_runtime(create=True)
+        self.ai_provider_dialog = AiProviderDialog(
+            self,
+            runtime=runtime,
+            on_changed=self._on_ai_api_key_changed,
+        )
+        self.ai_provider_dialog.exec_()
 
     def _open_ai_api_key_dialog(self):
         from .ai_api_key_dialog import AiApiKeyDialog
@@ -1153,7 +1191,7 @@ class PyMOLQtGUI(QtWidgets.QMainWindow, pymol._gui.PyMOLDesktopGUI):
 
         runtime = self.get_ai_runtime(create=True)
         if runtime is not None:
-            runtime.import_session_state(runtime_state, apply_model=False)
+            runtime.import_session_state(runtime_state, apply_model=True)
             runtime.reset_remote_session_binding(reason="history_chat_selected")
             mode = runtime.current_input_mode
             self._sync_ai_settings_menu_from_runtime()

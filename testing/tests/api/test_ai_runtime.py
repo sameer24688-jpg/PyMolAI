@@ -59,10 +59,14 @@ class FakeSdkLoop:
         self.calls = []
 
     def map_openrouter_env(self):
+        return self.map_provider_env("openrouter")
+
+    def map_provider_env(self, provider_id=None):
         return {
             "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
             "ANTHROPIC_AUTH_TOKEN": "test",
             "ANTHROPIC_API_KEY": "",
+            "PYMOL_AI_PROVIDER": str(provider_id or "openrouter"),
         }
 
     def run_turn(self, **kwargs):
@@ -110,10 +114,14 @@ class FakeSdkLoop:
 
 
 def _runtime(monkeypatch):
+    monkeypatch.setenv("PYMOL_AI_PROVIDER", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("PYMOL_AI_DISABLE", raising=False)
     monkeypatch.setenv("PYMOL_AI_REASONING_DEFAULT", "0")
     monkeypatch.setenv("PYMOL_AI_CONVERSATION_MODE", "local_first")
+    monkeypatch.setattr(runtime_module, "load_all_saved_keys_into_env", lambda: [])
     runtime = AiRuntime(DummyCmd())
     runtime.set_ui_mode("qt")
     return runtime
@@ -124,10 +132,13 @@ def _events(runtime):
 
 
 def test_runtime_bootstraps_saved_api_key(monkeypatch):
+    monkeypatch.setenv("PYMOL_AI_PROVIDER", "openrouter")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
     monkeypatch.setenv("PYMOL_AI_REASONING_DEFAULT", "0")
     monkeypatch.setenv("PYMOL_AI_CONVERSATION_MODE", "local_first")
+    monkeypatch.setattr(runtime_module, "load_all_saved_keys_into_env", lambda: [])
 
     def fake_load():
         monkeypatch.setenv("OPENROUTER_API_KEY", "saved-key-1234")
@@ -274,11 +285,13 @@ def test_ensure_ai_default_mode(monkeypatch):
     assert runtime.enabled is True
 
 
-def test_export_import_session_state_roundtrip(monkeypatch):
+def test_export_import_session_state_roundtrip(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYMOL_AI_PROVIDER_CONFIG", str(tmp_path / "provider_config.json"))
     runtime = _runtime(monkeypatch)
+    runtime.set_provider("fireworks", emit_notice=False, reset_model=True)
     runtime.input_mode = "cli"
     runtime.history = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
-    runtime.model = "openai/test"
+    runtime.model = "accounts/fireworks/models/glm-5p2"
     runtime.enabled = True
     runtime.reasoning_visible = True
     runtime._sdk_session_id = "sess_1"
@@ -292,7 +305,9 @@ def test_export_import_session_state_roundtrip(monkeypatch):
     assert state["sdk_session_id"] == "sess_1"
     assert state["conversation_mode"] == "hybrid_resume"
     assert state["chat_query_session_id"] == "chat_scope_1"
+    assert state["model_info"]["provider"] == "fireworks"
 
+    monkeypatch.setenv("PYMOL_AI_PROVIDER", "openrouter")
     restored = _runtime(monkeypatch)
     restored.import_session_state(state, apply_model=False)
     assert restored.input_mode == "cli"
@@ -300,9 +315,34 @@ def test_export_import_session_state_roundtrip(monkeypatch):
     assert restored._sdk_session_id == "sess_1"
     assert restored.conversation_mode == "hybrid_resume"
     assert restored._chat_query_session_id == "chat_scope_1"
+    assert restored.provider == "fireworks"
+    assert restored.model == "accounts/fireworks/models/glm-5p2"
     restored.import_session_state(state, apply_model=True)
-    assert restored.model == "openai/test"
+    assert restored.model == "accounts/fireworks/models/glm-5p2"
     assert restored.reasoning_visible is True
+    assert restored.provider == "fireworks"
+
+
+def test_runtime_bootstraps_saved_fireworks_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYMOL_AI_PROVIDER_CONFIG", str(tmp_path / "provider_config.json"))
+    from pymol.ai.providers import save_active_provider_preference, save_preferred_model
+
+    save_active_provider_preference("fireworks")
+    save_preferred_model("fireworks", "accounts/fireworks/models/glm-5p2")
+    monkeypatch.delenv("PYMOL_AI_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fw-test-key")
+    monkeypatch.setenv("PYMOL_AI_REASONING_DEFAULT", "0")
+    monkeypatch.setenv("PYMOL_AI_CONVERSATION_MODE", "local_first")
+    monkeypatch.setattr(runtime_module, "load_all_saved_keys_into_env", lambda: [])
+    monkeypatch.setattr(
+        runtime_module,
+        "load_saved_key_into_env_if_needed",
+        lambda: ApiKeyStatus(has_key=False, source="none", masked_key="", keyring_available=True),
+    )
+    runtime = AiRuntime(DummyCmd())
+    assert runtime.provider == "fireworks"
+    assert runtime.model == "accounts/fireworks/models/glm-5p2"
 
 
 def test_runtime_events_and_history_do_not_expose_api_key(monkeypatch):
@@ -314,13 +354,17 @@ def test_runtime_events_and_history_do_not_expose_api_key(monkeypatch):
 
 
 def test_missing_api_key_does_not_enable(monkeypatch):
+    monkeypatch.setenv("PYMOL_AI_PROVIDER", "openrouter")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    monkeypatch.setattr(runtime_module, "load_all_saved_keys_into_env", lambda: [])
     monkeypatch.setattr(
         runtime_module,
         "load_saved_key_into_env_if_needed",
         lambda: ApiKeyStatus(has_key=False, source="none", masked_key="", keyring_available=True),
     )
+    monkeypatch.setattr(runtime_module, "resolve_api_key", lambda provider_id=None: "")
     runtime = AiRuntime(DummyCmd())
     runtime.set_ui_mode("qt")
 

@@ -350,6 +350,21 @@ class AiChatStore:
         model_info = payload.get("model_info") or {}
         if not isinstance(model_info, dict):
             model_info = {}
+        sanitized_model_info = {
+            "model": str(model_info.get("model") or "").strip(),
+            "provider": str(model_info.get("provider") or "").strip(),
+            "enabled": bool(model_info.get("enabled")) if "enabled" in model_info else None,
+            "reasoning_visible": bool(model_info.get("reasoning_visible"))
+            if "reasoning_visible" in model_info
+            else None,
+            "debug_mode": bool(model_info.get("debug_mode")) if "debug_mode" in model_info else None,
+            "agent_mode": str(model_info.get("agent_mode") or "").strip() or None,
+            "final_answer_enabled": bool(model_info.get("final_answer_enabled"))
+            if "final_answer_enabled" in model_info
+            else None,
+        }
+        # Drop None placeholders so empty chats stay compact.
+        sanitized_model_info = {k: v for k, v in sanitized_model_info.items() if v is not None and v != ""}
         return {
             "input_mode": input_mode,
             "backend": backend,
@@ -357,7 +372,7 @@ class AiChatStore:
             "conversation_mode": conversation_mode,
             "chat_query_session_id": chat_query_session_id,
             "history": history,
-            "model_info": model_info,
+            "model_info": sanitized_model_info,
         }
 
     def set_runtime_state(self, chat_id: str, state: Optional[Dict[str, Any]]) -> None:

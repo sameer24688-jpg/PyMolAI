@@ -166,6 +166,7 @@ def test_map_openrouter_env(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("PYMOL_AI_PROVIDER", raising=False)
 
     loop = ClaudeSdkLoop()
     env = loop.map_openrouter_env()
@@ -173,6 +174,23 @@ def test_map_openrouter_env(monkeypatch):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "or-key"
     assert env["ANTHROPIC_BASE_URL"].startswith("https://openrouter.ai/")
     assert env["ANTHROPIC_API_KEY"] == ""
+
+
+def test_map_provider_env_fireworks(monkeypatch):
+    import os
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fw-key")
+    assert os.getenv("FIREWORKS_API_KEY") == "fw-key"
+
+    loop = ClaudeSdkLoop()
+    env = loop.map_provider_env("fireworks")
+
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "fw-key"
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.fireworks.ai/inference"
+    assert env["PYMOL_AI_PROVIDER"] == "fireworks"
 
 
 def test_trace_stream_default_off_and_setter(monkeypatch):

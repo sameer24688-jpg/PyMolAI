@@ -317,29 +317,68 @@ class ClaudeSdkLoop:
             line += " | " + " ".join(parts)
         self._logger.log(getattr(logging, str(level).upper(), logging.INFO), line)
 
-    def map_openrouter_env(self) -> Dict[str, str]:
-        base = (
-            os.getenv("ANTHROPIC_BASE_URL")
-            or os.getenv("OPENROUTER_BASE_URL")
-            or "https://openrouter.ai/api"
-        )
-        token = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("OPENROUTER_API_KEY") or ""
+    def map_provider_env(self, provider_id: Optional[str] = None) -> Dict[str, str]:
+        """Map the active LLM provider into Claude Agent SDK Anthropic env vars."""
+        try:
+            from .provider_key_store import resolve_api_key
+            from .providers import get_provider_spec, resolve_anthropic_compat_base_url
+        except ImportError:
+            # Supports tests that import this module as a top-level path module.
+            from pymol.ai.provider_key_store import resolve_api_key
+            from pymol.ai.providers import get_provider_spec, resolve_anthropic_compat_base_url
 
-        os.environ.setdefault("ANTHROPIC_BASE_URL", base)
+        spec = get_provider_spec(provider_id)
+        if spec.api_style != "anthropic_compat":
+            self._log(
+                "provider is openai_compat; Claude SDK env map still applied for token/base",
+                level="WARNING",
+                provider=spec.id,
+            )
+
+        # Prefer explicit ANTHROPIC_BASE_URL only for openrouter backward-compat.
+        if spec.id == "openrouter":
+            base = (
+                os.getenv("ANTHROPIC_BASE_URL")
+                or os.getenv("OPENROUTER_BASE_URL")
+                or resolve_anthropic_compat_base_url(spec)
+            )
+        else:
+            base = resolve_anthropic_compat_base_url(spec)
+
+        token = str(os.getenv(spec.key_env) or "").strip()
+        if not token:
+            token = resolve_api_key(spec.id)
+        if not token and spec.id == "openrouter":
+            token = (
+                str(os.getenv("ANTHROPIC_AUTH_TOKEN") or "").strip()
+                or str(os.getenv("OPENROUTER_API_KEY") or "").strip()
+            )
+
+        os.environ["ANTHROPIC_BASE_URL"] = base
         if token:
-            os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)
-        os.environ.setdefault("ANTHROPIC_API_KEY", "")
+            os.environ["ANTHROPIC_AUTH_TOKEN"] = token
+        if spec.id in ("openrouter", "fireworks", "custom"):
+            os.environ["ANTHROPIC_API_KEY"] = ""
+        elif spec.id == "anthropic" and token:
+            os.environ.setdefault("ANTHROPIC_API_KEY", token)
+
         self._log(
-            "mapped OpenRouter env for Claude SDK",
+            "mapped provider env for Claude SDK",
+            provider=spec.id,
             base_url=base,
             has_auth_token=bool(token),
+            api_style=spec.api_style,
         )
-
         return {
             "ANTHROPIC_BASE_URL": base,
             "ANTHROPIC_AUTH_TOKEN": token,
-            "ANTHROPIC_API_KEY": "",
+            "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY") or "",
+            "PYMOL_AI_PROVIDER": spec.id,
         }
+
+    def map_openrouter_env(self) -> Dict[str, str]:
+        """Backward-compatible wrapper; defaults to OpenRouter-compatible mapping."""
+        return self.map_provider_env("openrouter")
 
     def build_tool_server(
         self,
@@ -468,7 +507,7 @@ class ClaudeSdkLoop:
         PermissionResultDeny = getattr(symbols["module"], "PermissionResultDeny")
         sdk_package = symbols.get("sdk_package", "unknown")
 
-        mapped_env = self.map_openrouter_env()
+        mapped_env = self.map_provider_env()
         mcp_server = self.build_tool_server(
             create_sdk_mcp_server=create_sdk_mcp_server,
             tool=tool,

@@ -6,3 +6,31 @@ build
 .venv/
 *.egg-info
 .venv_py39_backup/*
+.runtime-dlls/
+_pe_imports.py
+_pe_imports_out.txt
+
+# Local runtime / native build artifacts
+deps/
+.hypothesis/
+modules/pymol/_cmd*.pyd
+modules/pymol/_cmd*.so
+*.pyd
+
+# Structure / chemistry data (never commit proprietary or local datasets)
+*.cif
+*.sdf
+*.sd
+*.mol
+*.mol2
+*.mae
+*.maegz
+*.pse
+*.pdb
+
+# Secrets and local env
+.env
+.env.*
+*.pem
+*credentials*
+*_api_key*

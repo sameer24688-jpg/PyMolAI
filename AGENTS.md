@@ -76,19 +76,32 @@ python -c "from PyQt5 import QtWidgets; print('ok: PyQt5')"
 Environment variables:
 - `OPENROUTER_API_KEY`
 - `ANTHROPIC_AUTH_TOKEN`
+- `ANTHROPIC_API_KEY`
+- `FIREWORKS_API_KEY`
+- `OPENAI_API_KEY`
+- `DEEPSEEK_API_KEY`
+- `MOONSHOT_API_KEY` (Kimi)
+- `PYMOL_AI_CUSTOM_API_KEY`
 - `OPENBIO_API_KEY`
 - `OPENBIO_BASE_URL`
+- `PYMOL_AI_PROVIDER` (`openrouter` default; also `fireworks`, `anthropic`, `openai`, `deepseek`, `kimi`, `custom`)
+- `PYMOL_AI_BASE_URL` / `PYMOL_AI_CUSTOM_*` (custom provider name/url/addon/api_style)
 - `PYMOL_AI_OPENROUTER_KEY_SOURCE`
 - `PYMOL_AI_OPENBIO_KEY_SOURCE`
 
 Behavior contract:
-- Without OpenRouter key (or Anthropic auth token mapping), AI mode is disabled.
+- Without a key for the **active** provider, AI mode is disabled.
+- Default provider remains OpenRouter for compatibility; switch via `Display -> PyMolAI Settings -> LLM Providers...`.
+- Active provider and last model are persisted in `provider_config.json` (under APPDATA/PyMolAI) and restored on launch when `PYMOL_AI_PROVIDER` is unset.
+- Anthropic-compatible providers (OpenRouter, Fireworks, Anthropic, custom anthropic_compat) use the Claude Agent SDK path.
+- OpenAI-compatible providers (OpenAI, DeepSeek, Kimi, custom openai_compat) use the OpenAI chat+tools path.
 - Without OpenBio key, OpenBio tools are not registered, but the app still works.
-- Model selector in settings is strict to supported models; `/ai model <id>` remains flexible.
+- Model selector favorites are provider-aware; use `Display -> PyMolAI Settings -> Edit AI Models...` to refresh catalogs, add custom IDs, and set the active chat model.
+- `/ai model <id>` remains flexible.
 - Changing model while busy applies to the next turn and should show a user-facing notice.
 
 Key storage:
-- UI save uses `keyring` and system keychain.
+- UI save uses `keyring` and system keychain (**per provider account**).
 - Runtime can load saved keys into process environment at startup.
 - Env key takes precedence when explicitly set.
 
