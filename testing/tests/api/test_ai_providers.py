@@ -92,6 +92,20 @@ def test_save_custom_overrides_preserves_active_provider(clean_provider_env):
     assert spec.url == "http://127.0.0.1:1234"
 
 
+def test_resolve_model_for_provider_drops_stale_unlisted_ids(clean_provider_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("PYMOL_AI_MODELS_CONFIG", str(tmp_path / "ai_models.json"))
+    providers_mod.save_preferred_model("openrouter", "openai/gpt-luna-latest")
+    resolved = providers_mod.resolve_model_for_provider("openrouter", allow_unlisted=False)
+    assert resolved == providers_mod.provider_default_model("openrouter")
+    assert resolved != "openai/gpt-luna-latest"
+
+
+def test_model_compatible_rejects_cross_provider_ids(clean_provider_env):
+    assert providers_mod.model_compatible_with_provider("openrouter", "accounts/fireworks/models/glm-5p2") is False
+    assert providers_mod.model_compatible_with_provider("fireworks", "anthropic/claude-sonnet-4.6") is False
+    assert providers_mod.normalize_model_id("~openai/gpt-luna-latest~") == "openai/gpt-luna-latest"
+
+
 def test_provider_menu_entries_include_custom(clean_provider_env):
     ids = [pid for pid, _ in providers_mod.provider_menu_entries()]
     for expected in ("openrouter", "fireworks", "anthropic", "openai", "deepseek", "kimi", "custom"):

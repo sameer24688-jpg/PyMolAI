@@ -335,15 +335,23 @@ class ClaudeSdkLoop:
                 provider=spec.id,
             )
 
-        # Prefer explicit ANTHROPIC_BASE_URL only for openrouter backward-compat.
+        # Always derive base URL from the active provider spec. Never reuse a stale
+        # ANTHROPIC_BASE_URL left over from a previous provider (e.g. Fireworks -> OpenRouter),
+        # or tool calls / edits go to the wrong host and appear broken.
+        base = resolve_anthropic_compat_base_url(spec)
         if spec.id == "openrouter":
-            base = (
-                os.getenv("ANTHROPIC_BASE_URL")
-                or os.getenv("OPENROUTER_BASE_URL")
-                or resolve_anthropic_compat_base_url(spec)
-            )
-        else:
-            base = resolve_anthropic_compat_base_url(spec)
+            override = str(os.getenv("OPENROUTER_BASE_URL") or "").strip()
+            if override:
+                base = override
+            else:
+                stale = str(os.getenv("ANTHROPIC_BASE_URL") or "").strip()
+                if stale and "openrouter.ai" in stale:
+                    base = stale
+        elif spec.id == "custom":
+            override = str(os.getenv("ANTHROPIC_BASE_URL") or "").strip()
+            # Only honor custom override when no provider-specific URL is configured.
+            if override and not str(spec.url or "").strip():
+                base = override
 
         token = str(os.getenv(spec.key_env) or "").strip()
         if not token:
@@ -430,8 +438,10 @@ class ClaudeSdkLoop:
                     "text": json.dumps(payload, ensure_ascii=False),
                 }
             ]
+            # Only include image if vision is enabled (some models don't support images)
+            vision_enabled = os.getenv("PYMOL_AI_VISION_ENABLED", "1") != "0"
             image_data, mime_type = _decode_data_url_image(str(image_data_url or ""))
-            if image_data:
+            if image_data and vision_enabled:
                 content.append(
                     {
                         "type": "image",
@@ -507,7 +517,7 @@ class ClaudeSdkLoop:
         PermissionResultDeny = getattr(symbols["module"], "PermissionResultDeny")
         sdk_package = symbols.get("sdk_package", "unknown")
 
-        mapped_env = self.map_provider_env()
+        mapped_env = self.map_provider_env(os.getenv("PYMOL_AI_PROVIDER") or None)
         mcp_server = self.build_tool_server(
             create_sdk_mcp_server=create_sdk_mcp_server,
             tool=tool,

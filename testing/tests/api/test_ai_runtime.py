@@ -345,12 +345,76 @@ def test_runtime_bootstraps_saved_fireworks_provider(monkeypatch, tmp_path):
     assert runtime.model == "accounts/fireworks/models/glm-5p2"
 
 
+def test_provider_switch_heals_incompatible_model(monkeypatch, tmp_path):
+    """Switching providers must resolve a compatible model even if the old model is cached."""
+    monkeypatch.setenv("PYMOL_AI_PROVIDER_CONFIG", str(tmp_path / "provider_config.json"))
+    from pymol.ai.providers import save_preferred_model
+
+    runtime = _runtime(monkeypatch)
+    # Start on OpenRouter with an OpenRouter-specific model
+    runtime.set_provider("openrouter", emit_notice=False, reset_model=False)
+    runtime.model = "anthropic/claude-sonnet-4.6"
+    save_preferred_model("openrouter", "anthropic/claude-sonnet-4.6")
+
+    # Switch to Fireworks - the model should be healed to a Fireworks-compatible one
+    runtime.set_provider("fireworks", emit_notice=False, reset_model=True)
+    assert runtime.provider == "fireworks"
+    # Model should NOT be anthropic/claude-sonnet-4.6 (which is OpenRouter-specific)
+    assert not runtime.model.startswith("anthropic/")
+    assert runtime.model.startswith("accounts/") or "/" not in runtime.model
+
+
+def test_provider_switch_resets_sdk_session(monkeypatch, tmp_path):
+    """Switching providers must reset SDK session to prevent cross-provider resume."""
+    monkeypatch.setenv("PYMOL_AI_PROVIDER_CONFIG", str(tmp_path / "provider_config.json"))
+    runtime = _runtime(monkeypatch)
+    runtime.set_provider("openrouter", emit_notice=False, reset_model=True)
+    runtime._sdk_session_id = "old_openrouter_session"
+    old_query_session = runtime._chat_query_session_id
+
+    # Switch to Fireworks
+    runtime.set_provider("fireworks", emit_notice=False, reset_model=True)
+
+    assert runtime._sdk_session_id is None
+    assert runtime._chat_query_session_id != old_query_session
+    assert runtime.provider == "fireworks"
+
+
 def test_runtime_events_and_history_do_not_expose_api_key(monkeypatch):
     runtime = _runtime(monkeypatch)
     runtime.handle_typed_input("/ai")
     events = _events(runtime)
     serialized = repr(events) + repr(runtime.history) + repr(runtime.export_session_state())
     assert "test-key" not in serialized
+
+
+def test_session_import_heals_cross_provider_model(monkeypatch, tmp_path):
+    """Importing a session with a cross-provider model must heal to a compatible one."""
+    monkeypatch.setenv("PYMOL_AI_PROVIDER_CONFIG", str(tmp_path / "provider_config.json"))
+    runtime = _runtime(monkeypatch)
+
+    # Import state that has a Fireworks model but OpenRouter provider
+    state = {
+        "input_mode": "ai",
+        "history": [],
+        "backend": "claude_sdk",
+        "sdk_session_id": None,
+        "conversation_mode": "local_first",
+        "chat_query_session_id": "test_chat",
+        "model_info": {
+            "model": "accounts/fireworks/models/glm-5p2",  # Fireworks model
+            "provider": "openrouter",  # But OpenRouter provider
+            "enabled": True,
+        },
+    }
+
+    runtime.import_session_state(state, apply_model=True)
+
+    # Provider should be OpenRouter
+    assert runtime.provider == "openrouter"
+    # Model should be healed to OpenRouter-compatible (NOT a Fireworks model)
+    assert not runtime.model.startswith("accounts/fireworks/")
+    assert "/" in runtime.model  # OpenRouter models have vendor/model format
 
 
 def test_missing_api_key_does_not_enable(monkeypatch):

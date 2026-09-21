@@ -10,6 +10,8 @@ from .models import DEFAULT_MODEL
 from .providers import (
     ProviderSpec,
     get_provider_spec,
+    model_compatible_with_provider,
+    normalize_model_id,
     resolve_openai_compat_base_url,
 )
 
@@ -228,30 +230,11 @@ def resolve_api_key(provider_id: Optional[str] = None) -> str:
     return _env_key_for(spec)
 
 
-def _model_looks_compatible(spec: ProviderSpec, model: str) -> bool:
-    mid = str(model or "").strip()
-    if not mid:
-        return False
-    if spec.id == "fireworks":
-        return mid.startswith("accounts/") or "/" not in mid
-    if spec.id == "openrouter":
-        return "/" in mid or mid.startswith("openrouter/")
-    if spec.id == "anthropic":
-        return mid.startswith("claude-")
-    if spec.id == "openai":
-        return mid.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-"))
-    if spec.id == "deepseek":
-        return mid.startswith("deepseek")
-    if spec.id == "kimi":
-        return mid.startswith(("moonshot", "kimi"))
-    return True
-
-
 def resolve_validation_model(provider_id: str, model: str = "") -> str:
     """Pick a provider-local model for key tests; ignore cross-provider leftovers."""
-    spec = _spec(provider_id)
-    candidate = str(model or "").strip()
-    if candidate and _model_looks_compatible(spec, candidate):
+    spec = get_provider_spec(provider_id)
+    candidate = normalize_model_id(model)
+    if candidate and model_compatible_with_provider(spec.id, candidate):
         return candidate
     return str(spec.default_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
 

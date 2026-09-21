@@ -87,9 +87,37 @@ def test_smoke_runtime_switches_backend_with_provider(monkeypatch):
     assert runtime.provider == "openai"
     assert runtime._agent_backend == "openai_compat"
     assert backend_for_provider("openai") == "openai_compat"
+    assert runtime.model == "gpt-4o-mini"
 
     runtime.set_provider("openrouter", emit_notice=False)
     assert runtime._agent_backend == "claude_sdk"
+    assert runtime.model == "anthropic/claude-sonnet-4.6"
+
+
+def test_smoke_provider_switch_resets_stale_model_and_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYMOL_AI_PROVIDER_CONFIG", str(tmp_path / "provider_config.json"))
+    monkeypatch.setenv("PYMOL_AI_PROVIDER", "fireworks")
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fw-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.delenv("PYMOL_AI_DISABLE", raising=False)
+    monkeypatch.setattr(
+        "pymol.ai.runtime.load_saved_key_into_env_if_needed",
+        lambda: SimpleNamespace(source="env", has_key=True, masked_key="****", keyring_available=True),
+    )
+    monkeypatch.setattr("pymol.ai.runtime.load_all_saved_keys_into_env", lambda: [])
+    monkeypatch.setattr(
+        "pymol.ai.runtime.load_openbio_saved_key_into_env_if_needed",
+        lambda: SimpleNamespace(source="none", has_key=False, masked_key="", keyring_available=True),
+    )
+    from pymol.ai.providers import save_preferred_model
+
+    save_preferred_model("openrouter", "openai/gpt-luna-latest")
+    runtime = AiRuntime(DummyCmd())
+    runtime._sdk_session_id = "old-fireworks-session"
+    runtime.set_provider("openrouter", emit_notice=False, reset_model=True)
+    assert runtime.provider == "openrouter"
+    assert runtime.model == "anthropic/claude-sonnet-4.6"
+    assert runtime._sdk_session_id is None
 
 
 def test_smoke_openai_compat_loop_auth_error_without_key():

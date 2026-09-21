@@ -379,6 +379,96 @@ def provider_default_model(provider_id: Optional[str] = None) -> str:
     return str(get_provider_spec(provider_id).default_model or "").strip()
 
 
+def normalize_model_id(model_id: object) -> str:
+    """Strip whitespace and markdown wrappers (e.g. OpenRouter '~model~' italics)."""
+    text = str(model_id or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("~", "*", "`", "'", '"'):
+        text = text[1:-1].strip()
+    # Leading/trailing orphan tildes from copy-paste of error text.
+    text = text.strip("~").strip()
+    return text
+
+
+def model_compatible_with_provider(provider_id: Optional[str], model_id: object) -> bool:
+    mid = normalize_model_id(model_id)
+    if not mid:
+        return False
+    pid = normalize_provider_id(provider_id)
+    if pid == "fireworks":
+        return mid.startswith("accounts/") or ("/" not in mid and not mid.startswith("anthropic/"))
+    if pid == "openrouter":
+        # OpenRouter ids are typically vendor/model; reject Fireworks resource paths.
+        if mid.startswith("accounts/fireworks/"):
+            return False
+        return "/" in mid
+    if pid == "anthropic":
+        return mid.startswith("claude-") and "/" not in mid
+    if pid == "openai":
+        return mid.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-")) and not mid.startswith("openai/")
+    if pid == "deepseek":
+        return mid.startswith("deepseek")
+    if pid == "kimi":
+        return mid.startswith(("moonshot", "kimi"))
+    if pid == "custom":
+        return True
+    return True
+
+
+def _known_model_ids_for_provider(provider_id: str) -> set:
+    pid = normalize_provider_id(provider_id)
+    known = set()
+    default = provider_default_model(pid)
+    if default:
+        known.add(default)
+    try:
+        from .model_catalog import favorites_for_provider
+
+        for entry in favorites_for_provider(pid):
+            known.add(normalize_model_id(entry.model_id))
+    except Exception:
+        pass
+    try:
+        from .model_store import load_saved_models
+
+        for item in load_saved_models(pid):
+            known.add(normalize_model_id(item.model_id))
+    except Exception:
+        pass
+    return {m for m in known if m}
+
+
+def resolve_model_for_provider(
+    provider_id: Optional[str],
+    candidate: object = "",
+    *,
+    allow_unlisted: bool = False,
+) -> str:
+    """
+    Pick a safe model for a provider.
+
+    Preferred/candidate is used only when compatible. Unless allow_unlisted=True
+    (explicit user pick), unlisted catalog leftovers fall back to the provider default
+    so switching providers cannot revive inaccessible one-off IDs.
+    """
+    pid = normalize_provider_id(provider_id)
+    default = provider_default_model(pid)
+    if not default and pid == "openrouter":
+        default = "anthropic/claude-sonnet-4.6"
+    preferred = load_preferred_model(pid)
+    known = _known_model_ids_for_provider(pid)
+
+    for mid in (normalize_model_id(candidate), preferred):
+        if not mid or not model_compatible_with_provider(pid, mid):
+            continue
+        if allow_unlisted or mid in known:
+            return mid
+    if default:
+        return default
+    if preferred and model_compatible_with_provider(pid, preferred) and allow_unlisted:
+        return preferred
+    return "anthropic/claude-sonnet-4.6"
+
+
 def backend_for_provider(provider_id: Optional[str] = None) -> str:
     style = get_provider_spec(provider_id).api_style
     return "claude_sdk" if style == "anthropic_compat" else "openai_compat"

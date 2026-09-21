@@ -20,7 +20,10 @@ from .providers import (
     backend_for_provider,
     bootstrap_active_provider_env,
     load_preferred_model,
+    model_compatible_with_provider,
+    normalize_model_id,
     provider_default_model,
+    resolve_model_for_provider,
     save_preferred_model,
     set_active_provider,
     active_provider_id,
@@ -32,18 +35,17 @@ from .tool_execution import run_pymol_command
 from .vision_capture import capture_viewer_snapshot
 
 SYSTEM_PROMPT_BASE = """You are a PyMOL desktop agent.
-You can either:
-1) call tools to act in PyMOL, or
-2) provide a final direct answer without tool calls.
+You MUST call tools to execute PyMOL commands. You cannot execute commands by just describing them.
 
 Rules:
-- Use tool calls when an action/query in PyMOL is needed.
-- If tool results already answer the user, return a final direct answer and DO NOT call tools.
+- CRITICAL: To change anything in PyMOL, you MUST call run_pymol_command. Text descriptions alone do NOT execute commands.
+- IMPORTANT: Each new user message is a NEW request. Execute the requested action even if similar commands were run before.
+- If the user asks for a visual change (show, hide, color, surface, zoom, etc.), you MUST call run_pymol_command.
+- Never claim a command was executed unless you see the tool result confirming it.
 - Prefer minimal, reversible commands first; escalate complexity only when needed.
 - If you use terminal commands, run them only when required and only to support the user's request.
 - Always report terminal actions factually from tool output; do not claim actions that were not actually executed.
 - If external dependencies (like ffmpeg) are missing, state that limitation plainly and ask the user to install them.
-- Prefer continuing current session state; avoid redundant fetch/load.
 - If you are unsure about PyMOL command syntax/options, check help before guessing (e.g., help <command>), then proceed.
 - On command failure: read the error, check help for the failing command, and retry once with corrected syntax.
 - For multi-step workflows, first provide a brief plan (2-4 steps), then execute.
@@ -57,7 +59,7 @@ Rules:
 - Do not claim completion until scene validation has been performed (or explicitly explain why validation failed).
 - Do not repeat the same setup sentence or intent text step after step.
 - If a strategy fails repeatedly, switch approach or ask the user for clarification.
-- Do not re-run the same successful command in the same request unless you clearly explain why.
+- Within a single turn, avoid re-running the exact same successful command unless necessary.
 - End each turn with a concise structured summary: actions completed, key outputs/observations, and next step (if any).
 """
 
@@ -126,12 +128,15 @@ class AiRuntime:
                 self._api_key_source = load_provider_key(self.provider).source
             except Exception:
                 self._api_key_source = key_status.source
-        self.model = (
-            os.getenv("PYMOL_AI_DEFAULT_MODEL")
-            or load_preferred_model(self.provider)
-            or provider_default_model(self.provider)
-            or DEFAULT_MODEL
+        self.model = resolve_model_for_provider(
+            self.provider,
+            os.getenv("PYMOL_AI_DEFAULT_MODEL") or load_preferred_model(self.provider),
+            allow_unlisted=bool(str(os.getenv("PYMOL_AI_DEFAULT_MODEL") or "").strip()),
         )
+        try:
+            save_preferred_model(self.provider, self.model)
+        except Exception:
+            pass
         self.reasoning_visible = _env_int("PYMOL_AI_REASONING_DEFAULT", 1) == 1
         self.agent_mode = self._normalize_agent_mode(os.getenv("PYMOL_AI_AGENT_MODE") or "work")
         self.input_mode = "ai"
@@ -249,22 +254,30 @@ class AiRuntime:
         return self.agent_mode
 
     def set_provider(self, provider_id: str, *, emit_notice: bool = True, reset_model: bool = True) -> str:
+        prev_provider = str(getattr(self, "provider", "") or "")
         pid = set_active_provider(provider_id)
         self.provider = pid
         self._agent_backend = backend_for_provider(pid)
         if self._agent_backend == "claude_sdk":
             self._sdk_loop.map_provider_env(pid)
+        # Provider changes must not resume a prior provider's remote session/model binding.
+        if prev_provider and prev_provider != pid:
+            self.reset_remote_session_binding(reason="provider_changed:%s->%s" % (prev_provider, pid))
         if reset_model:
-            default_model = (
-                load_preferred_model(pid)
-                or provider_default_model(pid)
+            # Hard reset to the provider default (or a known favorite) on every provider switch.
+            self.model = provider_default_model(pid) or resolve_model_for_provider(
+                pid, allow_unlisted=False
             )
-            if default_model:
-                self.model = default_model
-                try:
-                    save_preferred_model(pid, self.model)
-                except Exception:
-                    pass
+            try:
+                save_preferred_model(pid, self.model)
+            except Exception:
+                pass
+        elif not model_compatible_with_provider(pid, getattr(self, "model", "")):
+            self.model = resolve_model_for_provider(pid, allow_unlisted=False)
+            try:
+                save_preferred_model(pid, self.model)
+            except Exception:
+                pass
         self.enabled = bool(self._api_key) and os.getenv("PYMOL_AI_DISABLE", "").strip() != "1"
         self._log_ai(
             "ai provider changed",
@@ -277,13 +290,26 @@ class AiRuntime:
             self.emit_ui_event(
                 UiEvent(
                     role=UiRole.SYSTEM,
-                    text="Provider set to %s (%s)." % (self.provider, self._agent_backend),
+                    text="Provider set to %s (%s). Active model: %s."
+                    % (self.provider, self._agent_backend, self.model),
                 )
             )
         return self.provider
 
     def set_model(self, model_id: str, emit_notice: bool = True) -> str:
-        value = str(model_id or "").strip() or DEFAULT_MODEL
+        raw = normalize_model_id(model_id)
+        if raw and model_compatible_with_provider(self.provider, raw):
+            value = raw
+        else:
+            value = resolve_model_for_provider(self.provider, raw, allow_unlisted=False)
+            if emit_notice and raw and raw != value:
+                self.emit_ui_event(
+                    UiEvent(
+                        role=UiRole.SYSTEM,
+                        text="Model %s is not valid for provider %s; using %s instead."
+                        % (raw, self.provider, value),
+                    )
+                )
         self.model = value
         try:
             save_preferred_model(self.provider, self.model)
@@ -306,6 +332,29 @@ class AiRuntime:
                 )
             else:
                 self.emit_ui_event(UiEvent(role=UiRole.SYSTEM, text="Model set to %s." % (self.model,)))
+        return self.model
+
+    def ensure_model_for_active_provider(self, *, emit_notice: bool = False) -> str:
+        """Heal cross-provider / malformed model IDs before a turn or after UI restore."""
+        current = normalize_model_id(self.model)
+        if current and model_compatible_with_provider(self.provider, current):
+            if current != self.model:
+                self.model = current
+            return self.model
+        resolved = resolve_model_for_provider(self.provider, allow_unlisted=False)
+        if emit_notice and current and current != resolved:
+            self.emit_ui_event(
+                UiEvent(
+                    role=UiRole.SYSTEM,
+                    text="Active model %s does not match provider %s; switched to %s."
+                    % (current, self.provider, resolved),
+                )
+            )
+        self.model = resolved
+        try:
+            save_preferred_model(self.provider, self.model)
+        except Exception:
+            pass
         return self.model
 
     @property
@@ -430,23 +479,37 @@ class AiRuntime:
             if "agent_mode" in model_info:
                 self.set_agent_mode(str(model_info.get("agent_mode") or "work"))
 
-            # Always restore provider/model from chat state when present so reopen
-            # does not fall back to OpenRouter defaults after a successful switch.
-            provider = str(model_info.get("provider") or "").strip()
-            if provider:
-                self.set_provider(provider, emit_notice=False, reset_model=False)
-            model = str(model_info.get("model") or "").strip()
-            if model:
+        # Restore provider/model. Keep remote session ids from the payload when the
+        # imported provider matches (set_provider clears bindings only on change).
+        provider = str(model_info.get("provider") or "").strip()
+        restored_session = self._sdk_session_id
+        restored_query_session = self._chat_query_session_id
+        if provider:
+            self.set_provider(provider, emit_notice=False, reset_model=False)
+            if self.provider == provider:
+                if restored_session:
+                    self._sdk_session_id = restored_session
+                if restored_query_session:
+                    self._chat_query_session_id = restored_query_session
+        model = normalize_model_id(model_info.get("model") or "")
+        if model:
+            if model_compatible_with_provider(self.provider, model):
                 if apply_model:
                     self.set_model(model, emit_notice=False)
                 else:
-                    self.model = model
+                    self.model = resolve_model_for_provider(
+                        self.provider, model, allow_unlisted=True
+                    )
                     try:
                         save_preferred_model(self.provider, self.model)
                     except Exception:
                         pass
-            if "enabled" in model_info:
-                self.enabled = bool(model_info.get("enabled"))
+            else:
+                self.ensure_model_for_active_provider(emit_notice=False)
+        else:
+            self.ensure_model_for_active_provider(emit_notice=False)
+        if "enabled" in model_info:
+            self.enabled = bool(model_info.get("enabled"))
         self._log_ai(
             "session state imported",
             apply_model=apply_model,
@@ -954,6 +1017,9 @@ class AiRuntime:
             self._stream_had_output = False
             self._stream_line_buffer = ""
             self._stream_full_text = ""
+            # Clear stale tool results so the LLM doesn't see "already done" commands
+            # from previous turns and skip executing the user's new request.
+            self._recent_tool_results.clear()
 
             pending_validation_required = False
             validation_done_this_turn = False
@@ -1268,6 +1334,7 @@ class AiRuntime:
                 include_history_context = False
 
             turn_prompt = self._build_turn_prompt(prompt, include_history_context=include_history_context)
+            self.ensure_model_for_active_provider(emit_notice=True)
             self._log_ai(
                 "agent turn run",
                 backend=self._agent_backend,

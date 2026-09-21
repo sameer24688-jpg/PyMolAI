@@ -193,6 +193,36 @@ def test_map_provider_env_fireworks(monkeypatch):
     assert env["PYMOL_AI_PROVIDER"] == "fireworks"
 
 
+def test_map_provider_env_openrouter_ignores_stale_fireworks_base(monkeypatch):
+    """Regression: Fireworks left ANTHROPIC_BASE_URL set; OpenRouter must not reuse it."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.fireworks.ai/inference")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.setenv("PYMOL_AI_PROVIDER", "openrouter")
+
+    loop = ClaudeSdkLoop()
+    env = loop.map_provider_env("openrouter")
+
+    assert "openrouter.ai" in env["ANTHROPIC_BASE_URL"]
+    assert "fireworks.ai" not in env["ANTHROPIC_BASE_URL"]
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "or-key"
+
+
+def test_map_provider_env_fireworks_ignores_stale_openrouter_base(monkeypatch):
+    """Reverse regression: OpenRouter left ANTHROPIC_BASE_URL set; Fireworks must not reuse it."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api")
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fw-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("PYMOL_AI_PROVIDER", "fireworks")
+
+    loop = ClaudeSdkLoop()
+    env = loop.map_provider_env("fireworks")
+
+    assert "fireworks.ai" in env["ANTHROPIC_BASE_URL"]
+    assert "openrouter.ai" not in env["ANTHROPIC_BASE_URL"]
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "fw-key"
+
+
 def test_trace_stream_default_off_and_setter(monkeypatch):
     monkeypatch.delenv("PYMOL_AI_TRACE_STREAM", raising=False)
     loop = ClaudeSdkLoop()
